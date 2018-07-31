@@ -1,0 +1,248 @@
+---
+title: 'Análise de Sentimentos de tweets: Azealia Banks'
+author: "Paulo Vinícius Soares"
+date: "31 de julho de 2018"
+output: 
+  html_document:
+        toc: true
+        toc_float: true
+        toc_depth: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introdução
+
+Olá, pessoal. Essa é uma análise que se dá no contexto da disciplina de Recuperação da Informação e Busca na Web do período 2018.1, na Universidade Federal de Campina Grande (UFCG). No dia em que essa atividade fora proposta, a cantora e _rapper_ Azealia Banks anunciou uma _tour_ ao Brasil se tornando um assunto muito comentado na rede social.  
+
+Nascida em Harlem, Nova Iorque, a cantora possui uma longa história na carreira e gera opiniões controversas nas redes sociais. Com 27 anos de idade, extremamente talentosa e com vários trabalhos lançados - tais como [Broke With Expensive Taste](http://www.metacritic.com/music/broke-with-expensive-taste/azealia-banks), [Fantasea](https://pt.wikipedia.org/wiki/Fantasea), [1991](http://www.metacritic.com/music/1991-ep/azealia-banks) e [Slay-z](http://www.metacritic.com/music/slay-z-mixtape/azealia-banks) - Banks é muito firme em suas opiniões, o que pode doer nos ouvidos de algumas pessoas.  
+
+Um modelo de classificação como este é extremamente útil para identificar insatisfações ou elogios com relação à determinado tema possibilitando a tomada de decisão que melhore esse quadro, no caso de insatisfações, e continuação das medidas de sucesso, no caso dos elogios. Dado esse cenário onde a mesma anunciou um show ao Brasil e existem opiniões muito divergentes sobre ela, a tarefa de captação e classificação de dados se tornou mais fácil.  
+
+A proposta dessa atividade é elaborar um modelo que classifique os tweets em **positivo** e **negativo** dado um texto. Para os dados de treino utilizaremos uma base pronta que nos foi fornecida e que pode ser baixada através desse [link](https://github.com/antonioricardojr/dataset). A forma de classificação para esses _tweets_ foi:
+
+ - _tweets_ positivos: Contém emojis :) ou :D ou :-)
+ - _tweets_ negativos: Contém emojis :( ou :-(
+ 
+Essa classificação pode não ser a mais adequada haja visto que o _Twitter_ é uma rede social onde predomina a escrita irônica, de forma que alguns _tweets_ contendo o emoji feliz podiam representar na verdade um sentimento triste. Dentro dessa atividade iremos abstrair esse conceito da escrita irônica na rede social.  
+
+Para testar o modelo, vamos utilizar um [crawler](https://gist.github.com/vickyqian/f70e9ab3910c7c290d9d715491cde44c) para baixar os _tweets_ sobre a Azealia, selecionar 65 tweets e classificá-los manualmente. Em seguida veremos a acurácia do nosso modelo.
+
+# Preparação dos dados
+
+Primeiramente, vamos importar os dados que utilizaremos nessa análise. Vamos importar os tweets, além das bibliotecas utilizadas e a lista de _stop words_. As bibliotecas utilizadas serão _tidyverse_, _text2vec_ e _glmnet_ para treinamento e predição dos resultados. Vamos utilizar a biblioteca _DT_ para visualização dos resultados.
+
+## Import dos dados e bibliotecas
+
+```{r message=FALSE, cache=FALSE}
+# Import das bibliotecas
+library(tidyverse)
+library(tidytext)
+library(text2vec)
+library(glmnet)
+library(DT)
+```
+
+```{r message=FALSE}
+# Import dos tweets
+tweets <- read_delim("~/Documentos/rec-info/database/all_tweets.csv", "\t", escape_double = FALSE, trim_ws = TRUE)
+test <- read_csv("~/Documentos/rec-info/lab03/test/azealia_banks_classificado.csv")
+
+# Enumera dataframe de testes com o id
+test$id <- c(1:nrow(test))
+
+# Import das stop_words pt-br https://gist.github.com/alopes/5358189
+stop_words <- read_csv("~/Documentos/rec-info/database/stopwords.txt")$words
+```
+
+_Stop words_ são um conjunto de palavras desconsideradas para fins de análise por não possuir valor semântico, tais como preposições. Utilizaremos esse conjunto mais a frente.
+
+## Limpeza dos dados
+O texto de um _tweet_ possui muita coisa irrelevante para análise, tais como menções, _hashtags_ e _links_, de forma que é necessário limpar tudo isso e deixar somente o texto. Vamos fazer isso abaixo, normalizando o texto:
+
+```{r}
+# Para os tweets de treino
+tweets$text <- gsub("#([a-z|A-Z|0-9|_])*","", tweets$text) # remove hashtags
+tweets$text <- gsub('@([a-z|A-Z|0-9|_])*', '', tweets$text) # remove palavras com @ (menções)
+tweets$text <- gsub('https://','', tweets$text) # removes https://
+tweets$text <- gsub('http://','', tweets$text) # removes http://
+tweets$text <- gsub('[^[:graph:]]', ' ', tweets$text) # removes graphic characters like emoticons 
+tweets$text <- gsub('[[:punct:]]', '', tweets$text) # removes punctuation 
+tweets$text <- gsub('[[:cntrl:]]', '', tweets$text) # removes control characters
+tweets$text <- gsub("\\w*[0-9]+\\w*\\s*", "", tweets$text) # removes numbers
+tweets$text <- tolower(tweets$text) # caixa baixa
+
+# Para os tweets de teste
+test$text <- gsub("#([a-z|A-Z|0-9|_])*","", test$text) # remove hashtags
+test$text <- gsub('@([a-z|A-Z|0-9|_])*', '', test$text) # remove palavras com @ (menções)
+test$text <- gsub('https://','', test$text) # removes https://
+test$text <- gsub('http://','', test$text) # removes http://
+test$text <- gsub('[^[:graph:]]', ' ', test$text) # removes graphic characters like emoticons 
+test$text <- gsub('[[:punct:]]', '', test$text) # removes punctuation 
+test$text <- gsub('[[:cntrl:]]', '', test$text) # removes control characters
+test$text <- gsub("\\w*[0-9]+\\w*\\s*", "", test$text) # removes numbers
+
+test$text <- tolower(test$text) # caixa baixa
+```
+
+# Treinamento do modelo
+
+Agora vamos à etapa de treinamento do modelo, onde construiremos nossa matriz de ocorrência das palavras por documento. Vamos podar palavras para reduzir o tamanho da nossa matriz. Serão desconsideradas as _stop words_ e palavras que não aparecem com muita frequência nos tweets, ou seja, não possuem significância relativa. Vamos agrupar por bigramas também, de forma que é esperado um aumento na acurácia. Utilizaremos a biblioteca _glmnet_ que atua muito bem em classificação de grupos. A técnica utilizada será um modelo de regressão logística com penalidade L1 e 4-fold de validação cruzada.
+
+## Criação dos tokens
+O primeiro passo é montar nosso vocabulário de tokens a partir dos tweets, então:
+```{r}
+tok_fun <- word_tokenizer
+
+it_train <- itoken(tweets$text, 
+             tokenizer = tok_fun, 
+             ids = tweets$id, 
+             progressbar = FALSE)
+
+vocab <- create_vocabulary(it_train, stopwords = stop_words)
+vocab
+```
+Nosso vocabulário contém aproximadamente 38 mil palavras. É muita coisa!
+
+## Poda do vocabulário
+Agora vamos remover palavras que não possuem frequência significativa:
+```{r}
+pruned_vocab <- prune_vocabulary(vocab, 
+                                 term_count_min = 10, 
+                                 doc_proportion_max = 0.5,
+                                 doc_proportion_min = 0.001)
+pruned_vocab
+```
+Com isso, nosso vocabulário cai para aproximadamente 800 palavras! É uma redução muito grande, mas que pode ser útil para classificar nossos tweets.
+
+## Treinando o classificador utilizando apenas vocabulário podado
+Agora vamos colocar a mão na massa e treinar o classificador. Primeiro criamos o vetorizador e em seguida geramos a nossa matriz esparsa.
+```{r}
+
+vectorizer <- vocab_vectorizer(pruned_vocab)
+dtm_train <- create_dtm(it_train, vectorizer)
+
+NFOLDS = 5
+glmnet_classifier <- cv.glmnet(x = dtm_train, y = tweets[['sentiment']], 
+                              family = 'binomial', 
+                              # L1 penalty
+                              alpha = 1,
+                              # interested in the area under ROC curve
+                              type.measure = "auc",
+                              # 5-fold cross-validation
+                              nfolds = NFOLDS,
+                              # high value is less accurate, but has faster training
+                              thresh = 1e-3,
+                              # again lower number of iterations for faster training
+                              maxit = 1e3)
+```
+
+## Treinando usando bigramas
+Utilizar bigramas apresenta uma melhora recorrente para classificação de sentimentos em textos, vamos verificar se há uma melhora para este caso. Também vamos verificar a aparição mínima dessa palavra em 10 tweets.
+```{r}
+vocab_bigram <- create_vocabulary(it_train, ngram = c(1L, 2L))
+vocab_bigram <- prune_vocabulary(vocab_bigram, term_count_min = 10, 
+                         doc_proportion_max = 0.5)
+
+bigram_vectorizer <- vocab_vectorizer(vocab_bigram)
+
+dtm_train_bigram <- create_dtm(it_train, bigram_vectorizer)
+
+glmnet_classifier_bigram <- cv.glmnet(x = dtm_train_bigram, y = tweets[['sentiment']], 
+                 family = 'binomial', 
+                 alpha = 1,
+                 type.measure = "auc",
+                 nfolds = NFOLDS,
+                 thresh = 1e-3,
+                 maxit = 1e3)
+```
+
+# Testando os modelos
+Chegou a hora de verificar como se comportaram os classificadores para os textos. Vamos testar os nossos modelos da seguinte forma: Criaremos uma matriz esparsa de ocorrência dos termos e vamos _tokenizar_ as palavras criando um novo vocabulário. Em seguida, iremos aplicar essa matriz ao modelo e calcular a sua acurácia.
+
+## Testando o modelo simples, com o vocabulário podado
+Vamos rodar o modelo para os nossos tweets sobre Azealia previamente classificados.
+```{r}
+it_test <- test$text %>% 
+  tok_fun %>% 
+  # turn off progressbar because it won't look nice in rmd
+  itoken(ids = test$id, progressbar = FALSE)
+         
+
+dtm_test <- create_dtm(it_test, vectorizer)
+
+preds <- predict(glmnet_classifier, dtm_test, type = 'response')[,1]
+test$predict_sentiment_simple <- predict(glmnet_classifier, dtm_test, type = 'response')[,1]
+```
+
+### Reportando acurácia
+```{r}
+glmnet:::auc(test$sentiment, preds)
+```
+A acurácia do nosso modelo foi aproximadamente **70%**, o que é um número relativamente bom para as primeiras tentativas. Outras formas de aumentar a acurácia seria selecionar melhor o conjunto de treino, baseado em outras formas de captação de sentimento, por exemplo. 
+
+### Demonstrando classificação
+Podemos ver aqui como os tweets se comportam. Em geral, os tweets neutros ou irrelevantes foram desconsiderados desse dataframe ficando aqueles com alguma opinião firme sobre a cantora.
+```{r}
+class_simple <- test %>%
+  select(text, sentiment, predict_sentiment_simple) %>%
+  mutate(sentiment = ifelse(sentiment==1, "Positivo", "Negativo"), 
+         predict_sentiment_simple = ifelse(predict_sentiment_simple > 0.5, "Positivo", "Negativo"))
+
+class_simple %>%
+  datatable()
+```
+
+## Testando o modelo utilizando bigramas
+Será que ao utilizar bigramas a acurácia aumenta? Vamos descobrir agora elaborando esse modelo baseado em bigramas.
+```{r}
+it_test <- test$text %>% 
+  tok_fun %>% 
+  # turn off progressbar because it won't look nice in rmd
+  itoken(ids = test$id, progressbar = FALSE)
+
+dtm_test <- create_dtm(it_test, bigram_vectorizer)
+
+preds <- predict(glmnet_classifier_bigram, dtm_test, type = 'response')[,1]
+test$predict_sentiment_bigram <- predict(glmnet_classifier_bigram, dtm_test, type = 'response')[,1]
+```
+
+### Reportando acurácia
+```{r}
+glmnet:::auc(test$sentiment, preds)
+```
+A acurácia diminuiu um pouco, na verdade, mas ficou em torno de 70% também. Um _tweet_ pode conter várias palavras desconexas, mas que fazem sentido no contexto da rede social.
+
+### Demonstrando classificação e comparando com modelo anterior
+Vendo agora como se comporta a predição, podemos observar com maior cuidado onde o modelo de bigramas classificou de forma diferente com relação ao anterior.
+```{r}
+class_bigram <- test %>%
+  select(text, sentiment, predict_sentiment_bigram) %>%
+  mutate(sentiment = ifelse(sentiment==1, "Positivo", "Negativo"), 
+         predict_sentiment_bigram = ifelse(predict_sentiment_bigram > 0.5, "Positivo", "Negativo"))
+
+class_bigram$predict_sentiment_simple <- class_simple$predict_sentiment_simple
+
+class_bigram %>%
+  filter(predict_sentiment_simple != predict_sentiment_bigram) %>%
+  datatable()
+```
+
+Podemos observar que os significados de algumas palavras acima são mais sutis e dependem bastante do contexto. Para esses casos, o modelo de bigramas se saiu melhor e classificou com maior precisão. No geral é bom atentar para utilizar esse modelo para tweets mais extensos. A maior parte dos tweets do conjunto de testes era bem curto, favorecendo (apesar de pouco) o outro modelo.  
+
+Essa foi a análise, pessoal. Espero que tenham gostado!
+
+Referências:  
+
+- https://cran.r-project.org/web/packages/text2vec/vignettes/text-vectorization.html#vocabulary-based_vectorization  
+
+- https://www.hvitfeldt.me/2018/03/binary-text-classification-with-tidytext-and-caret/  
+
+- http://dataaspirant.com/2018/03/22/twitter-sentiment-analysis-using-r/  
+
+- https://analytics4all.org/2016/11/25/r-twitter-sentiment-analysis/  
+
+- https://rpubs.com/williamsurles/316682  
+
